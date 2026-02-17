@@ -1,0 +1,276 @@
+/*********************************************************************************************************
+ * @title: General shelly load shedding script
+ * @(C): Jonas Bjurel et Al.
+ * @License: Apache 2 
+ * @description: 
+ *
+ *********************************************************************************************************/
+
+
+
+
+/************************************************  settings  *********************************************
+
+ *********************************************************************************************************/
+
+
+
+
+/***********************************************  Todo:   ************************************************
+ * 1) Fix generic webhook shed handling
+ * 2) Rebase variable names
+ * 3) Priority override handling
+ *
+**********************************************************************************************************/
+
+
+
+
+/***********************************  Program variables, do not change   *********************************/
+let shelly_call_records = [];
+const LOG_VERBOSE = 0;
+const LOG_INFO = 1;
+const LOG_WARN = 2;
+const LOG_ERROR = 3;
+const LOG_CRITICAL = 4;
+/*********************************************************************************************************/
+
+
+
+
+/****************************   Default settings, can be changed with caution    *************************/
+/*************************  But can also be permanently changed with KVS webhooks   **********************/
+let hostname_setting = "";
+let on_time_setting = 8100;
+let log_level_setting = LOG_INFO;
+let channel_id_setting = 0;
+let status_webhook_uri_setting = "";
+/*********************************************************************************************************/
+
+
+
+
+/*********************************************************************************************************/
+/*                                          Platform functions                                           */
+/*********************************************************************************************************/
+
+/* function def(o);
+ * Check if defined */
+function def(o) {
+  return typeof o !== "undefined";
+}
+
+
+/* function log(severity, log_entry);
+ * Log entries to console according to "log_level_setting" which can be any of
+ *  LOG_VERBOSE, LOG_INFO, LOG_WARN, LOG_ERROR and LOG_CRITICAL */
+function log(severity, log_entry) {
+  if (severity >= log_level_setting)
+    print(log_entry);
+}
+
+/* function queueShellyCall()
+ * Queues a shelly call. As Shelly only allows a very limited number of system calls running in parallel,
+ * this functions helps to serialize Shelly calls by queueing them for execution, one after one. */
+function queueShellyCall(method, method_param, cb_fun, cb_fun_params) {
+  shelly_call_records.push({meth:method, meth_param: method_param, cb: cb_fun,
+   cb_params: cb_fun_params});
+  if (shelly_call_records.length == 1) {
+    Shelly.emitEvent("continueExecQueuedShellyCalls", {});
+  }
+}
+
+/* function execQueuedShellyCalls()
+ * Executes queued shelly calls, when a call has finished it's synchronous execution,
+ * the next in the queue's execution gets triggered by the "continueExecQueuedShellyCalls"
+ * event */
+function execQueuedShellyCalls() {
+  if (shelly_call_records.length > 0) {
+    Shelly.call(shelly_call_records[0].meth, meth_param,
+                function(result, error_code, error_message) {
+		              shelly_call_records[0].cb(result, error_code, error_message,
+                  shelly_call_records[0].cb_params);
+		              shelly_call_records.shift();
+		              Shelly.emitEvent("continueExecQueuedShellyCalls", {}); 
+                }
+    );
+}
+
+
+/* function shellyCallQueueEmpty()
+ * returns true if the call queue is empty, otherwise false */ 
+function shellyCallQueueEmpty() {
+   if (shelly_call_records.length)
+     return false;
+   else 
+     return true;
+}
+
+
+/* function shellyEventCb()
+ * A shelly or user defined event has been triggered */
+function shellyEventCb(event) {
+  switch (event.info.event) {
+
+    case "continueExecQueuedShellyCalls"													// A Shelly call task is completed, continue
+      execQueuedShellyCalls();																    // with next.
+      break;
+
+    case "continueExecQueuedShellyCalls":
+      
+
+    default:
+      break;
+  }
+}
+
+
+/* function reboot()
+ * Reboots the Shelly */
+function reboot() {
+  Shelly.Reboot();
+}
+/*********************************************************************************************************/
+
+
+
+
+/*********************************************************************************************************/
+/*                                        Application functions                                          */
+/*********************************************************************************************************/
+
+
+
+
+/* function turn()
+*/
+function turn(idx, dir) {
+  log(LOG_INFO, "Turning switch " + idx + " to " + dir);
+  on = dir == "on" ? "true" : "false";
+  switch_state = on;
+  if (def(o.gen)) {
+    let cmd = "rpc/" + o.type + ".Set?id=" + o.id.toString() + "&on=" + on;
+    queueShellyCall("Switch.Set", {on:on, id:idx});
+  }
+}
+
+/* function updateSettingsFromKVS();
+ * This functions sets the script variables from the Shelly Key-Value store which can be user set. */
+function updateSettingsFromKVS(){
+  queueShellyCall("KVS.GetMany", {},
+    function (result, error_code, error_message) {
+      for (let KVS in result.items) {
+        switch (result.items[KVS].key){
+
+          case "hostname_setting":
+            if (hostname_setting != result.items[KVS].value) {
+              hostname_setting = result.items[KVS].value;
+              log(LOG_INFO, "Hostname is set to: " + result.items[KVS].value);
+            }
+            break;
+
+          case "on_time_setting":
+            if (on_time_setting != result.items[KVS].value) {
+              on_time_setting = result.items[KVS].value;
+              log(LOG_INFO, "On time changed to: " + result.items[KVS].value);
+            }
+            break;
+            
+          case "channel_id_setting":
+            if (channel_id_setting != result.items[KVS].value) {
+              channel_id_setting = result.items[KVS].value;
+              log(LOG_INFO, "Channel Id changed to: " + result.items[KVS].value);
+            }
+            break;
+
+          case "status_webhook_uri_setting":
+            if (overload_webhook_uri_setting != result.items[KVS].value) {
+              overload_webhook_uri_setting = result.items[KVS].value;
+              log(LOG_INFO, "Overload Webhook URI set to  " + result.items[KVS].value);
+            }
+            break;            
+
+          case "log_level_setting":
+            if (log_level_setting != result.items[KVS].value) {
+              log_level_setting = result.items[KVS].value;
+              log(LOG_INFO, "Log level changed to  " + result.items[KVS].value);
+            }
+            break;            
+
+          case "factory_reset_to_default":
+            log(LOG_INFO, "Reboot to factory default");
+            queueShellyCall("KVS.List", {}, 
+                            function (result, error_code, error_message) {
+		                          for (key in result.keys) {
+		                            queueShellyCall("KVS.DELETE", {key:key},
+		                                            function(result, error_code, error_message) {
+                                                  return;
+                                                }
+                                )
+		                          }
+                              return;
+                            }
+            );
+            Timer.set(5000, false, reboot);
+            break;
+                       
+          default:
+            break;
+        }
+      }
+      return; 
+    }
+  )
+}
+
+
+/* function createKV(k, v, over_write);
+ * Creates Key-value store entries from the script defined setting defaults, if "over_write" is 
+ * set to true it will over-write an already existing key-value, otherwise not */
+function createKV(k, v, over_write) {
+  queueShellyCall("KVS.Get", {key:k}, 
+    function (result, error_code, error_message) {
+       if(!def(result) || over_write) {
+         queueShellyCall("KVS.Set", {key:k, value:v}, 
+           function(result, error_code, error_message){
+             return;  
+           }
+         )
+       } 
+    }
+  )
+}
+
+
+/* function updateKvs()
+ * Creates and update the Key-Value store from default settings */
+function updateKvs() {
+  log(LOG_INFO, "Creating KVS entries and setting them to default if not exist,\
+      if exist - updating script settings to default");
+  createKV("hostname_setting", hostname_setting, false);
+  createKV("on_time_setting", onTimeSetting, false);
+  createKV("channel_id_setting", channel_id_setting, false);
+  createKV("status_webhook_uri_setting", status_webhook_uri_setting, false);
+  createKV("log_level_setting", log_level_setting, false);
+}
+
+
+/* function scanPower()
+ * Main scan loop, gets invoked every "scan_interval" seconds. */
+function scanPower() {
+  updateSettingsFromKVS();
+}
+/*********************************************************************************************************/
+
+
+
+
+/*********************************************************************************************************/
+/*                                              main/init                                                */
+/*********************************************************************************************************/
+turn(channel_id_setting, "off");
+updateKvs();
+Shelly.addEventHandler(shellyEventCb); 
+Timer.set(scan_interval * 1000, true, scanPower);
+
+/*********************************************************************************************************/
